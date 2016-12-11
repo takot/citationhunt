@@ -22,6 +22,7 @@ if _upper_dir not in sys.path:
 import config
 import chdb as chdb_
 from utils import *
+from wplib import categories
 
 import docopt
 
@@ -75,16 +76,6 @@ class CategoryName(unicode):
             ustr = ustr[len('Wikipedia:'):]
         return CategoryName(ustr.replace('_', ' '))
 
-def category_ids_to_names(wpcursor, category_ids):
-    category_names = set()
-    for pageid in category_ids:
-        wpcursor.execute('''SELECT page_title FROM page WHERE page_id = %s''',
-            (pageid,))
-        category_names.update(
-            CategoryName.from_wp_page(row[0])
-            for row in wpcursor)
-    return category_names
-
 def category_name_to_id(catname):
     return mkid(catname)
 
@@ -92,13 +83,6 @@ def load_unsourced_pageids(chdb):
     cursor = chdb.cursor()
     cursor.execute('''SELECT page_id FROM articles''')
     return set(r[0] for r in cursor)
-
-def load_hidden_categories(wpcursor, cfg):
-    wpcursor.execute('''
-        SELECT cl_from FROM categorylinks WHERE
-        cl_to = %s''', (cfg.hidden_category,))
-    hidden_page_ids = [row[0] for row in wpcursor]
-    return category_ids_to_names(wpcursor, hidden_page_ids)
 
 def load_categories_for_pages(wpcursor, pageids):
     wpcursor.execute('''
@@ -226,9 +210,10 @@ def assign_categories(mysql_default_cnf):
     # query the projects of the pages we know of instead.
     projectindex = load_projectindex(cfg)
 
-    # Load a set() of hidden categories
-    hidden_categories = wpdb.execute_with_retry(
-        load_hidden_categories, cfg)
+    hidden_categories = set(
+        CategoryName.from_wp_page(c) for c in
+        categories.expand_category_to_subcategories(
+            wpdb, cfg.hidden_category))
     log.info('loaded %d hidden categories (%s...)' % \
         (len(hidden_categories), next(iter(hidden_categories))))
 
