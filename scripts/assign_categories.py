@@ -79,23 +79,12 @@ class CategoryName(unicode):
 def category_name_to_id(catname):
     return mkid(catname)
 
-def load_unsourced_pageids(chdb):
-    cursor = chdb.cursor()
-    cursor.execute('''SELECT page_id FROM articles''')
-    return set(r[0] for r in cursor)
-
 def load_categories_for_pages(wpcursor, pageids):
     wpcursor.execute('''
         SELECT cl_to, cl_from FROM categorylinks WHERE cl_from IN %s''',
         (tuple(pageids),))
     return ((CategoryName.from_wp_categorylinks(row[0]), row[1])
             for row in wpcursor)
-
-def count_snippets_for_pages(chcursor):
-    chcursor.execute(
-        '''SELECT article_id, count(snippets.id) '''
-        '''FROM snippets GROUP BY article_id''')
-    return {row[0]: row[1] for row in chcursor}
 
 def load_projectindex(cfg):
     if not running_in_tools_labs() or cfg.lang_code != 'en':
@@ -129,46 +118,12 @@ def category_is_usable(cfg, catname, hidden_categories):
             return False
     return True
 
-def build_snippets_links_for_category(cursor, category_ids):
-    def pair_with_next(iterator):
-        """
-        Given an iterator (..., x, y, z, w, ...), returns another iterator of
-        tuples that pair each element to its successor, that is
-        (..., (x, y), (y, z), (z, w), ...).
-
-        The iterator "wraps around" at the end, that is, the last element is
-        paired with the first.
-        """
-
-        i1, i2 = it.tee(iterator)
-        return it.izip(i1, it.chain(i2, [next(i2)]))
-
-    # Populate the snippets_links table with pairs of snippets in the same
-    # category, so each article "points" to the next one in that category.
-    # The snippets are sorted by the title of their corresponding article.
-
-    # First, query all categories and snippets, in the proper order
-    cursor.execute('''
-        SELECT articles_categories.category_id, snippets.id
-        FROM snippets, articles_categories, articles
-        WHERE snippets.article_id = articles_categories.article_id AND
-        articles.page_id = articles_categories.article_id AND
-        articles_categories.category_id IN %s
-        ORDER BY articles_categories.category_id, articles.title;''',
-        (tuple(category_ids),))
-
-    # Now we indulge in some itertools magic to produce the pairs (or rather,
-    # triplets, as they also include the category id) that we want to insert.
-    # We want to use executemany for performance; the use of iterators saves
-    # some memory, but really I just wanted to look cool.
-    cursor.executemany('''
-        INSERT INTO snippets_links VALUES (%s, %s, %s)
-    ''', ((p, n, category_id)
-        for category_id, group in it.groupby(cursor, lambda (cid, sid): cid)
-        for p, n in pair_with_next(snippet_id for (_, snippet_id) in group)))
-
 def update_citationhunt_db(chdb, category_name_id_and_page_ids):
     def insert(cursor, chunk):
+        cursor.executemany('''
+            INSERT IGNORE INTO articles VALUES (%s)''',
+            ((pageid,) for pageid in it.chain(
+                *(pageids for _, _, pageids in chunk))))
         cursor.executemany('''
             INSERT IGNORE INTO categories VALUES (%s, %s)
         ''', ((category_id, category_name)
@@ -177,19 +132,11 @@ def update_citationhunt_db(chdb, category_name_id_and_page_ids):
             INSERT INTO articles_categories VALUES (%s, %s)
         ''', ((pageid, catid)
             for _, catid, pageids in chunk for pageid in pageids))
-        build_snippets_links_for_category(cursor,
-            (cid for (_, cid, _) in chunk))
 
     for c in ichunk(category_name_id_and_page_ids, 4096):
-        chdb.execute_with_retry(insert, list(c))
-
-def reset_chdb_tables(cursor):
-    log.info('resetting articles_categories table...')
-    cursor.execute('DELETE FROM articles_categories')
-    log.info('resetting categories table...')
-    cursor.execute('DELETE FROM categories')
-    log.info('resetting snippets_links table...')
-    cursor.execute('DELETE FROM snippets_links')
+        # We're trying to add the same pages multiple times
+        with chdb_.ignore_warnings():
+            chdb.execute_with_retry(insert, list(c))
 
 def assign_categories(mysql_default_cnf):
     cfg = config.get_localized_config()
@@ -198,16 +145,14 @@ def assign_categories(mysql_default_cnf):
         profiler.enable()
     start = time.time()
 
-    chdb = chdb_.init_scratch_db()
+    chdb = chdb_.reset_scratch_db()
     wpdb = chdb_.init_wp_replica_db()
 
-    chdb.execute_with_retry(reset_chdb_tables)
-    unsourced_pageids = load_unsourced_pageids(chdb)
+    unsourced_pageids = categories.expand_category_to_page_ids(
+        wpdb, cfg.citation_needed_category)
+    log.info('loaded %d unsourced page ids' % len(unsourced_pageids))
 
     # Load a list of (wikiproject, page ids), if applicable
-    # FIXME: We load all category -> page id mappings for all projects, then
-    # filter out the ones with no unsourced snippets. It's likely better to just
-    # query the projects of the pages we know of instead.
     projectindex = load_projectindex(cfg)
 
     hidden_categories = set(
@@ -227,18 +172,11 @@ def assign_categories(mysql_default_cnf):
             if category_is_usable(cfg, c, hidden_categories):
                 category_to_page_ids.setdefault(c, []).append(p)
 
-    # Now find out how many snippets each category has
-    category_to_snippet_count = {}
-    page_id_to_snippet_count = chdb.execute_with_retry(count_snippets_for_pages)
-    for category, page_ids in category_to_page_ids.iteritems():
-        category_to_snippet_count[category] = sum(
-            page_id_to_snippet_count.get(p, 0) for p in page_ids)
-
-    # And keep only the ones with at least two.
+    # Keep only the categories with at least a few unsourced pages
     category_name_id_and_page_ids = [
         (unicode(category), category_name_to_id(category), page_ids)
         for category, page_ids in category_to_page_ids.iteritems()
-        if category_to_snippet_count[category] >= 2
+        if len(category_to_page_ids[category]) >= 3
     ]
     log.info('finished with %d categories' % len(category_name_id_and_page_ids))
 
