@@ -1,4 +1,5 @@
 import MySQLdb
+import MySQLdb.cursors
 
 import config
 import warnings
@@ -11,80 +12,91 @@ ch_my_cnf = op.join(op.dirname(op.realpath(__file__)), 'ch.my.cnf')
 wp_my_cnf = op.join(op.dirname(op.realpath(__file__)), 'wp.my.cnf')
 
 class ConnectionPool(object):
-    _MAX_CONNECTIONS_PER_KEY = 50
+    '''
+    A pool for MySQLdb Connection objects, identified by the config file
+    used to initialize them.
+    '''
 
     def __init__(self):
         self._lock = threading.Lock()
         self._free_connections = {}
 
     def return_connection(self, conn):
+        '''Return a connection to the pool'''
         with self._lock:
-            connections = self._free_connections[conn._connection_pool_key]
+            # We assume the server will start disconnecting old connections, at
+            # which point they'll be garbage-collected using swap_connection
+            # later, so don't bother bounding the number of connections
+            connections = self._free_connections[conn._config_file]
             connections.append(conn)
-            if len(connections) > self._MAX_CONNECTIONS_PER_KEY:
-                for c in connections[:self._MAX_CONNECTIONS_PER_KEY]:
-                    c.close()
-                self._free_connections[conn._connection_pool_key] = connections[
-                    self._MAX_CONNECTIONS_PER_KEY:]
 
-    def get_connection(self, config_file):
+    def swap_connection(self, conn):
+        '''Swap a bad connection for a new connection'''
+        config_file, initializer = conn._config_file, conn._initializer
+        with self._lock:
+            assert conn not in self._free_connections[config_file]
+        conn.close = conn.really_close
+        return self.get_connection(config_file, initializer)
+
+    # FIXME: This should probably return a cursor instead of a connection.
+    # If we return a stale connection and it gets used as a context manager,
+    # even if the RetryingCursor does the right thing and refreshes the
+    # connection, the stale connection's __exit__ will get called and raise an
+    # exception just the same.
+    def get_connection(self, config_file, initializer = None):
+        '''Get a connection from the pool.
+
+        The `config_file` will be sourced to initialize the connection.
+        Additionally, the `initializer` callback will be called before
+        returning.
+        '''
         with self._lock:
             if not self._free_connections.setdefault(config_file, []):
                 conn = MySQLdb.connect(
-                    charset = 'utf8mb4', read_default_file = config_file)
-                conn._connection_pool_key = config_file
+                    charset = 'utf8mb4', read_default_file = config_file,
+                    cursorclass = RetryingCursor)
+                conn.really_close = conn.close
+                conn.close = functools.partial(self.return_connection, conn)
+                conn._config_file = config_file
                 self._free_connections[config_file].append(conn)
-            return self._free_connections[config_file].pop()
+            conn = self._free_connections[config_file].pop()
+
+        # keep track of the initializer for swapping
+        conn._initializer = initializer
+        if callable(conn._initializer):
+            conn._initializer(conn)
+        return conn
 _connection_pool = ConnectionPool()
 
-class RetryingConnection(object):
-    '''
-    Wraps a MySQLdb connection, handling retries as needed.
-    '''
-
-    def __init__(self, connect):
-        self._connect = connect
-        self._do_connect()
-
-    def _do_connect(self):
-        self.conn = self._connect()
-        self.conn.ping(True) # set the reconnect flag
-
-    def execute_with_retry(self, operations, *args, **kwds):
+class RetryingCursor(MySQLdb.cursors.Cursor):
+    def _with_retry(self, mth, query, *args):
         max_retries = 5
         for retry in range(max_retries):
             try:
-                with self.conn as cursor:
-                    return operations(cursor, *args, **kwds)
+                mth(query, *args)
             except MySQLdb.OperationalError:
                 if retry == max_retries - 1:
                     raise
                 else:
-                    self._do_connect()
+                    connection = _connection_pool.swap_connection(
+                        self.connection)
+                    super(RetryingCursor, self).__init__(connection)
             else:
                 break
 
-    def execute_with_retry_s(self, sql, *args):
-        def operations(cursor, sql, *args):
-            cursor.execute(sql, args)
-            if cursor.rowcount > 0:
-                return cursor.fetchall()
-            return None
-        return self.execute_with_retry(operations, sql, *args)
+    def execute(self, query, *args):
+        return self._with_retry(
+            super(RetryingCursor, self).execute, query, *args)
 
-    # https://stackoverflow.com/questions/4146095/ (sigh)
-    def __enter__(self):
-        return self.conn.__enter__()
-
-    def __exit__(self, *args):
-        return self.conn.__exit__(*args)
+    def executemany(self, query, *args):
+        return self._with_retry(
+            super(RetryingCursor, self).executemany, query, *args)
 
     def close(self):
-        _connection_pool.return_connection(self.conn)
-        self.conn = None
-
-    def __getattr__(self, name):
-        return getattr(self.conn, name)
+        # FIXME ConnectionPool should handle the same connection being returned
+        # more than once.
+        _connection_pool.return_connection(self.connection)
+        super(RetryingCursor, self).close()
 
 @contextlib.contextmanager
 def ignore_warnings():
@@ -98,34 +110,30 @@ def _make_tools_labs_dbname(db, database, lang_code):
     user = cursor.fetchone()[0]
     return '%s__%s_%s' % (user, database, lang_code)
 
-def _ensure_database(db, database, lang_code):
-    with db as cursor:
-        dbname = _make_tools_labs_dbname(db, database, lang_code)
-        with ignore_warnings():
-            cursor.execute('SET SESSION sql_mode = ""')
-            cursor.execute(
-                'CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4' % dbname)
-        cursor.execute('USE %s' % dbname)
+def _ensure_database(database, lang_code):
+    def _ensure_database_with_db(db):
+        with db as cursor:
+            dbname = _make_tools_labs_dbname(db, database, lang_code)
+            with ignore_warnings():
+                cursor.execute('SET SESSION sql_mode = ""')
+                cursor.execute(
+                    'CREATE DATABASE IF NOT EXISTS '
+                    '%s CHARACTER SET utf8mb4' % dbname)
+            cursor.execute('USE %s' % dbname)
+    return _ensure_database_with_db
 
 def init_db(lang_code):
-    def connect_and_initialize():
-        db = _connection_pool.get_connection(ch_my_cnf)
-        _ensure_database(db, 'citationhunt', lang_code)
-        return db
-    return RetryingConnection(connect_and_initialize)
+    return _connection_pool.get_connection(
+        ch_my_cnf, _ensure_database('citationhunt', lang_code))
 
 def init_scratch_db():
     cfg = config.get_localized_config()
-    def connect_and_initialize():
-        db = _connection_pool.get_connection(ch_my_cnf)
-        _ensure_database(db, 'scratch', cfg.lang_code)
-        return db
-    return RetryingConnection(connect_and_initialize)
+    return _connection_pool.get_connection(
+        ch_my_cnf, _ensure_database('scratch', cfg.lang_code))
 
 def init_stats_db():
-    def connect_and_initialize():
-        db = _connection_pool.get_connection(ch_my_cnf)
-        _ensure_database(db, 'stats', 'global')
+    def initialize(db):
+        _ensure_database('stats', 'global')(db)
         with db as cursor, ignore_warnings():
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS requests (
@@ -151,24 +159,20 @@ def init_stats_db():
                     ''' AS SELECT * FROM fixed WHERE lang_code = %s
                 ''', (lang_code,))
         return db
-    return RetryingConnection(connect_and_initialize)
+    return _connection_pool.get_connection(ch_my_cnf, initialize)
 
 def init_wp_replica_db():
     cfg = config.get_localized_config()
-    def connect_and_initialize():
-        db = _connection_pool.get_connection(wp_my_cnf)
+    def initialize(db):
         with db as cursor:
             cursor.execute('USE ' + cfg.database)
-        return db
-    return RetryingConnection(connect_and_initialize)
+    return _connection_pool.get_connection(wp_my_cnf, initialize)
 
 def init_projectindex_db():
-    def connect_and_initialize():
-        db = _connection_pool.get_connection(ch_my_cnf)
+    def initialize(db):
         with db as cursor:
             cursor.execute('USE s52475__wpx_p')
-        return db
-    return RetryingConnection(connect_and_initialize)
+    return _connection_pool.get_connection(ch_my_cnf, initialize)
 
 def reset_scratch_db():
     cfg = config.get_localized_config()

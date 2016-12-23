@@ -70,8 +70,9 @@ def compute_fixed_snippets(cfg):
     # Load snippets that have been clicked in the past few hours
     to_ts = datetime.datetime.today()
     from_ts = to_ts - datetime.timedelta(hours = 3)
-    page_title_to_snippets = stats_db.execute_with_retry(
-        load_pages_and_snippets_to_process, cfg.lang_code, from_ts, to_ts)
+    with stats_db as cursor:
+        page_title_to_snippets = load_pages_and_snippets_to_process(
+            cursor, cfg.lang_code, from_ts, to_ts)
 
     if not page_title_to_snippets:
         log.info('No pages to process!')
@@ -94,11 +95,12 @@ def compute_fixed_snippets(cfg):
                 id = mkid(d(page.title) + sni)
                 snippet_to_ts.pop(id, None)
 
-        for snippet_id, clicked_ts in snippet_to_ts.items():
-            log.info(snippet_id)
-            stats_db.execute_with_retry_s(
-                'INSERT IGNORE INTO fixed VALUES (%s, %s, %s)',
-                clicked_ts, snippet_id, cfg.lang_code)
+        with stats_db as cursor:
+            for snippet_id, clicked_ts in target_snippets.items():
+                log.info(snippet_id)
+                cursor.execute(
+                    'INSERT IGNORE INTO fixed VALUES (%s, %s, %s)',
+                    (clicked_ts, snippet_id, cfg.lang_code))
 
     live_db.close()
     stats_db.close()

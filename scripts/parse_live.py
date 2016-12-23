@@ -171,14 +171,13 @@ def work(pageids):
             article_row = (pageid, url, title)
             rows.append({'article': article_row, 'snippets': snippets_rows})
 
-    def insert(cursor, r):
-        cursor.execute('''
-            INSERT INTO articles VALUES(%s, %s, %s)''', r['article'])
-        cursor.executemany('''
-            INSERT IGNORE INTO snippets VALUES(%s, %s, %s, %s)''',
-            r['snippets'])
-    for r in rows:
-        self.chdb.execute_with_retry(insert, r)
+    with self.chdb as cursor:
+        for r in rows:
+            cursor.execute('''
+                INSERT INTO articles VALUES(%s, %s, %s)''', r['article'])
+            cursor.executemany('''
+                INSERT IGNORE INTO snippets VALUES(%s, %s, %s, %s)''',
+                r['snippets'])
 
 def parse_live(pageids, timeout):
     chdb.reset_scratch_db()

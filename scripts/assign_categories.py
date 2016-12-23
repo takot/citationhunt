@@ -93,25 +93,28 @@ def load_unsourced_pageids(chdb):
     cursor.execute('''SELECT page_id FROM articles''')
     return set(r[0] for r in cursor)
 
-def load_hidden_categories(wpcursor, cfg):
-    wpcursor.execute('''
-        SELECT cl_from FROM categorylinks WHERE
-        cl_to = %s''', (cfg.hidden_category,))
-    hidden_page_ids = [row[0] for row in wpcursor]
-    return category_ids_to_names(wpcursor, hidden_page_ids)
+def load_hidden_categories(wpdb, cfg):
+    with wpdb as cursor:
+        cursor.execute('''
+            SELECT cl_from FROM categorylinks WHERE
+            cl_to = %s''', (cfg.hidden_category,))
+        hidden_page_ids = [row[0] for row in cursor]
+        return category_ids_to_names(cursor, hidden_page_ids)
 
-def load_categories_for_pages(wpcursor, pageids):
-    wpcursor.execute('''
-        SELECT cl_to, cl_from FROM categorylinks WHERE cl_from IN %s''',
-        (tuple(pageids),))
-    return ((CategoryName.from_wp_categorylinks(row[0]), row[1])
-            for row in wpcursor)
+def load_categories_for_pages(wpdb, pageids):
+    with wpdb as cursor:
+        cursor.execute('''
+            SELECT cl_to, cl_from FROM categorylinks WHERE cl_from IN %s''',
+            (tuple(pageids),))
+        return ((CategoryName.from_wp_categorylinks(row[0]), row[1])
+                for row in cursor)
 
-def count_snippets_for_pages(chcursor):
-    chcursor.execute(
-        '''SELECT article_id, count(snippets.id) '''
-        '''FROM snippets GROUP BY article_id''')
-    return {row[0]: row[1] for row in chcursor}
+def count_snippets_for_pages(chdb):
+    with chdb as cursor:
+        cursor.execute(
+            '''SELECT article_id, count(snippets.id) '''
+            '''FROM snippets GROUP BY article_id''')
+        return {row[0]: row[1] for row in cursor}
 
 def load_projectindex(cfg):
     if not running_in_tools_labs() or cfg.lang_code != 'en':
@@ -184,33 +187,33 @@ def build_snippets_links_for_category(cursor, category_ids):
         for p, n in pair_with_next(snippet_id for (_, snippet_id) in group)))
 
 def update_citationhunt_db(chdb, category_name_id_and_page_ids):
-    def insert(cursor, chunk):
-        cursor.executemany('''
-            INSERT IGNORE INTO categories VALUES (%s, %s)
-        ''', ((category_id, category_name)
-            for category_name, category_id, _ in chunk))
-        cursor.executemany('''
-            INSERT INTO articles_categories VALUES (%s, %s)
-        ''', ((pageid, catid)
-            for _, catid, pageids in chunk for pageid in pageids))
-        build_snippets_links_for_category(cursor,
-            (cid for (_, cid, _) in chunk))
+    with chdb as cursor:
+        for c in ichunk(category_name_id_and_page_ids, 4096):
+            chunk = list(c)
+            cursor.executemany('''
+                INSERT IGNORE INTO categories VALUES (%s, %s)
+            ''', ((category_id, category_name)
+                for category_name, category_id, _ in chunk))
+            cursor.executemany('''
+                INSERT INTO articles_categories VALUES (%s, %s)
+            ''', ((pageid, catid)
+                for _, catid, pageids in chunk for pageid in pageids))
+            build_snippets_links_for_category(cursor,
+                (cid for (_, cid, _) in chunk))
 
-    for c in ichunk(category_name_id_and_page_ids, 4096):
-        chdb.execute_with_retry(insert, list(c))
+        cursor.execute('''
+            INSERT INTO category_article_count
+            SELECT category_id, COUNT(*) AS article_count
+            FROM articles_categories GROUP BY category_id''')
 
-    chdb.execute_with_retry_s('''
-        INSERT INTO category_article_count
-        SELECT category_id, COUNT(*) AS article_count
-        FROM articles_categories GROUP BY category_id''')
-
-def reset_chdb_tables(cursor):
-    log.info('resetting articles_categories table...')
-    cursor.execute('DELETE FROM articles_categories')
-    log.info('resetting categories table...')
-    cursor.execute('DELETE FROM categories')
-    log.info('resetting snippets_links table...')
-    cursor.execute('DELETE FROM snippets_links')
+def reset_chdb_tables(chdb):
+    with chdb as cursor:
+        log.info('resetting articles_categories table...')
+        cursor.execute('DELETE FROM articles_categories')
+        log.info('resetting categories table...')
+        cursor.execute('DELETE FROM categories')
+        log.info('resetting snippets_links table...')
+        cursor.execute('DELETE FROM snippets_links')
 
 def assign_categories(mysql_default_cnf):
     cfg = config.get_localized_config()
@@ -222,7 +225,7 @@ def assign_categories(mysql_default_cnf):
     chdb = chdb_.init_scratch_db()
     wpdb = chdb_.init_wp_replica_db()
 
-    chdb.execute_with_retry(reset_chdb_tables)
+    reset_chdb_tables(chdb)
     unsourced_pageids = load_unsourced_pageids(chdb)
 
     # Load a list of (wikiproject, page ids), if applicable
@@ -232,8 +235,7 @@ def assign_categories(mysql_default_cnf):
     projectindex = load_projectindex(cfg)
 
     # Load a set() of hidden categories
-    hidden_categories = wpdb.execute_with_retry(
-        load_hidden_categories, cfg)
+    hidden_categories = load_hidden_categories(wpdb, cfg)
     log.info('loaded %d hidden categories (%s...)' % \
         (len(hidden_categories), next(iter(hidden_categories))))
 
@@ -243,13 +245,13 @@ def assign_categories(mysql_default_cnf):
         if p in unsourced_pageids:
             category_to_page_ids.setdefault(c, []).append(p)
     for c in ichunk(unsourced_pageids, 10000):
-        for c, p in wpdb.execute_with_retry(load_categories_for_pages, c):
+        for c, p in load_categories_for_pages(wpdb, c):
             if category_is_usable(cfg, c, hidden_categories):
                 category_to_page_ids.setdefault(c, []).append(p)
 
     # Now find out how many snippets each category has
     category_to_snippet_count = {}
-    page_id_to_snippet_count = chdb.execute_with_retry(count_snippets_for_pages)
+    page_id_to_snippet_count = count_snippets_for_pages(chdb)
     for category, page_ids in category_to_page_ids.iteritems():
         category_to_snippet_count[category] = sum(
             page_id_to_snippet_count.get(p, 0) for p in page_ids)
