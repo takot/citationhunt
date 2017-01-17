@@ -235,18 +235,17 @@ class SnippetParserBase(object):
             secsnippets = []
             snippets.append([sectitle, secsnippets])
 
-            paragraphs = section.split('\n\n')
-            for paragraph in paragraphs:
-                # Invoking a string method on a Wikicode object returns a string,
-                # so we need to parse it again :(
-                wikicode = mwparserfromhell.parse(paragraph)
+            paragraphs = self._split_paragraphs(section)
+            for wikicode in paragraphs:
                 if self._has_blacklisted_tag_or_template(wikicode):
                     continue
-
                 snippet = self._cleanup_snippet_text(self._strip_code(wikicode))
                 if not self._cfg.html_snippet and '\n' in snippet:
                     # Lists cause more 'paragraphs' to be generated
-                    paragraphs.extend(snippet.split('\n'))
+                    # TODO Couldn't we just split on '\n' instead of '\n\n'
+                    # above?
+                    paragraphs.extend(
+                        mwparserfromhell.parse(p) for p in snippet.split('\n'))
                     continue
 
                 if CITATION_NEEDED_MARKER not in snippet:
@@ -384,12 +383,41 @@ class SnippetParserBase(object):
         return d(lxml.html.tostring(
             newroot, encoding = 'utf-8', method = 'html'))
 
+    def _split_paragraphs(self, wikicode):
+        paragraphs = []
+        current_paragraph = []
+        nodes = list(reversed(wikicode.nodes))
+        while nodes:
+            # consume text nodes inside this paragraph
+            while nodes:
+                n = nodes.pop()
+                if (isinstance(n, mwparserfromhell.nodes.text.Text)
+                    and '\n\n' in n.value):
+                    break
+                current_paragraph.append(n)
+            else:
+                # we ran out of nodes, so we're done
+                if current_paragraph:
+                    paragraphs.append(
+                        mwparserfromhell.wikicode.Wikicode(current_paragraph))
+                break
+
+            end_of_current, start_of_next = n.value.split('\n\n', 1)
+            if start_of_next:
+                nodes.append(
+                    mwparserfromhell.nodes.text.Text(start_of_next))
+            # end this paragraph, start a new one
+            current_paragraph.append(
+                mwparserfromhell.nodes.text.Text(end_of_current))
+            paragraphs.append(
+                mwparserfromhell.wikicode.Wikicode(current_paragraph))
+            current_paragraph = []
+        return paragraphs
+
     def _fast_parse(self, wikitext):
         tokenizer = mwparserfromhell.parser.CTokenizer()
         try:
-            # Passing skip_style_tags helps us get around some builder exceptions,
-            # see https://github.com/earwig/mwparserfromhell/issues/40
-            tokens = tokenizer.tokenize(wikitext, 0, True)
+            tokens = tokenizer.tokenize(wikitext, 0, False)
         except SystemError:
             # FIXME This happens sometimes on Tools Labs, why?
             return None
