@@ -189,7 +189,7 @@ def create_tables(db):
         ''')
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS articles (page_id INT(8) UNSIGNED
-            PRIMARY KEY, url VARCHAR(512), title VARCHAR(512))
+            PRIMARY KEY, url VARCHAR(512), title VARCHAR(512), rev_id INT(8))
             ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         ''')
         cursor.execute('''

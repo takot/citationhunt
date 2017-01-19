@@ -71,7 +71,7 @@ def query_pageids(wiki, pageids):
         'action': 'query',
         'pageids': '|'.join(map(str, pageids)),
         'prop': 'revisions',
-        'rvprop': 'content'
+        'rvprop': 'content|ids'
     }
 
     request = wikitools.APIRequest(wiki, params)
@@ -85,7 +85,8 @@ def query_pageids(wiki, pageids):
             if not text:
                 continue
             text = d(text)
-            yield (id, title, text)
+            revid = page['revisions'][0]['revid']
+            yield (id, title, text, revid)
 
 # An adapter that lets us use requests for wikitools until it doesn't grow
 # native support. This allows us to have persistent connections.
@@ -155,7 +156,7 @@ def with_max_exceptions(fn):
 def work(pageids):
     rows = []
     results = query_pageids(self.wiki, pageids)
-    for pageid, title, wikitext in results:
+    for pageid, title, wikitext, revid in results:
         url = WIKIPEDIA_WIKI_URL + title.replace(' ', '_')
 
         snippets_rows = []
@@ -168,12 +169,12 @@ def work(pageids):
                 snippets_rows.append(row)
 
         if snippets_rows:
-            article_row = (pageid, url, title)
+            article_row = (pageid, url, title, revid)
             rows.append({'article': article_row, 'snippets': snippets_rows})
 
     def insert(cursor, r):
         cursor.execute('''
-            INSERT INTO articles VALUES(%s, %s, %s)''', r['article'])
+            INSERT INTO articles VALUES(%s, %s, %s, %s)''', r['article'])
         cursor.executemany('''
             INSERT IGNORE INTO snippets VALUES(%s, %s, %s, %s)''',
             r['snippets'])
