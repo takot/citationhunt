@@ -34,13 +34,6 @@ import time
 
 log = Logger()
 
-def ichunk(iterable, chunk_size):
-    it0 = iter(iterable)
-    while True:
-        it1, it2 = it.tee(it.islice(it0, chunk_size))
-        next(it2)  # raises StopIteration if it0 is exhausted
-        yield it1
-
 class CategoryName(unicode):
     '''
     The canonical format for categories, which is the one we'll use

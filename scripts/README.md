@@ -73,11 +73,14 @@ $ export CH_LANG=en
 ```
 
 Next, let's generate the list of ids of pages with unsourced statements with
-`print_unsourced_pageids_from_wikipedia.py`:
+`compute_unsourced_pageids.py`:
 
 ```
-$ ./print_unsourced_pageids_from_wikipedia.py > unsourced
+$ ./compute_unsourced_pageids.py > unsourced
 ```
+
+If you have an existing database, this script will also figure out which pages
+are unmodified since that database was generated, and reuse their snippets.
 
 This list should be passed to the `parse_live.py` script, which will query the
 Wikipedia API for the actual content of the pages and identify snippets lacking

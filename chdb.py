@@ -8,6 +8,10 @@ import contextlib
 ch_my_cnf = op.join(op.dirname(op.realpath(__file__)), 'ch.my.cnf')
 wp_my_cnf = op.join(op.dirname(op.realpath(__file__)), 'wp.my.cnf')
 
+DBNAME_LIVE = 'citationhunt'
+DBNAME_SCRATCH = 'scratch'
+DBNAME_STATS = 'stats'
+
 class RetryingConnection(object):
     '''
     Wraps a MySQLdb connection, handling retries as needed.
@@ -62,7 +66,7 @@ def ignore_warnings():
 def _connect(config_file):
     return MySQLdb.connect(charset = 'utf8mb4', read_default_file = config_file)
 
-def _make_tools_labs_dbname(db, database, lang_code):
+def make_dbname(db, database, lang_code):
     cursor = db.cursor()
     cursor.execute("SELECT SUBSTRING_INDEX(USER(), '@', 1)")
     user = cursor.fetchone()[0]
@@ -70,7 +74,7 @@ def _make_tools_labs_dbname(db, database, lang_code):
 
 def _ensure_database(db, database, lang_code):
     with db as cursor:
-        dbname = _make_tools_labs_dbname(db, database, lang_code)
+        dbname = make_dbname(db, database, lang_code)
         with ignore_warnings():
             cursor.execute('SET SESSION sql_mode = ""')
             cursor.execute(
@@ -80,7 +84,7 @@ def _ensure_database(db, database, lang_code):
 def init_db(lang_code):
     def connect_and_initialize():
         db = _connect(ch_my_cnf)
-        _ensure_database(db, 'citationhunt', lang_code)
+        _ensure_database(db, DBNAME_LIVE, lang_code)
         return db
     return RetryingConnection(connect_and_initialize)
 
@@ -88,14 +92,14 @@ def init_scratch_db():
     cfg = config.get_localized_config()
     def connect_and_initialize():
         db = _connect(ch_my_cnf)
-        _ensure_database(db, 'scratch', cfg.lang_code)
+        _ensure_database(db, DBNAME_SCRATCH, cfg.lang_code)
         return db
     return RetryingConnection(connect_and_initialize)
 
 def init_stats_db():
     def connect_and_initialize():
         db = _connect(ch_my_cnf)
-        _ensure_database(db, 'stats', 'global')
+        _ensure_database(db, DBNAME_STATS, 'global')
         with db as cursor, ignore_warnings():
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS requests (
@@ -144,7 +148,7 @@ def reset_scratch_db():
     cfg = config.get_localized_config()
     db = init_db(cfg.lang_code)
     with db as cursor:
-        dbname = _make_tools_labs_dbname(db, 'scratch', cfg.lang_code)
+        dbname = make_dbname(db, 'scratch', cfg.lang_code)
         with ignore_warnings():
             cursor.execute('DROP DATABASE IF EXISTS ' + dbname)
         cursor.execute('CREATE DATABASE %s CHARACTER SET utf8mb4' % dbname)
@@ -158,8 +162,8 @@ def install_scratch_db():
     # ensure citationhunt is populated with tables
     create_tables(db)
 
-    chname = _make_tools_labs_dbname(db, 'citationhunt', cfg.lang_code)
-    scname = _make_tools_labs_dbname(db, 'scratch', cfg.lang_code)
+    chname = make_dbname(db, 'citationhunt', cfg.lang_code)
+    scname = make_dbname(db, 'scratch', cfg.lang_code)
     with db as cursor:
         # generate a sql query that will atomically swap tables in
         # 'citationhunt' and 'scratch'. Modified from:

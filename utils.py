@@ -2,6 +2,7 @@ import errno
 import os
 import sys
 import hashlib
+import itertools
 
 def e(s):
     if type(s) == str:
@@ -31,6 +32,13 @@ def mkdir_p(path):
             pass
         else:
             raise
+
+def ichunk(iterable, chunk_size):
+    it0 = iter(iterable)
+    while True:
+        it1, it2 = itertools.tee(itertools.islice(it0, chunk_size))
+        next(it2)  # raises StopIteration if it0 is exhausted
+        yield it1
 
 class Logger(object):
     def __init__(self):

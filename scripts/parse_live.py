@@ -182,7 +182,6 @@ def work(pageids):
         self.chdb.execute_with_retry(insert, r)
 
 def parse_live(pageids, timeout):
-    chdb.reset_scratch_db()
     backdir = tempfile.mkdtemp(prefix = 'citationhunt_parse_live_')
     pool = multiprocessing.Pool(
         initializer = initializer, initargs = (backdir,))
@@ -228,6 +227,7 @@ if __name__ == '__main__':
     start = time.time()
     with open(pageids_file) as pf:
         pageids = set(itertools.imap(str.strip, pf))
+        log.info('will parse %d page ids' % len(pageids))
     ret = parse_live(pageids, timeout)
     log.info('all done in %d seconds.' % (time.time() - start))
     sys.exit(ret)

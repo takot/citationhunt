@@ -110,7 +110,7 @@ def _update_db_tools_labs(cfg):
 
     unsourced = tempfile.NamedTemporaryFile()
     run_script(
-        'print_unsourced_pageids_from_wikipedia.py', wp_my_cnf + ' > ' +
+        'compute_unsourced_pageids.py', wp_my_cnf + ' > ' +
         unsourced.name)
     run_script('parse_live.py', unsourced.name)
     run_script('assign_categories.py')
